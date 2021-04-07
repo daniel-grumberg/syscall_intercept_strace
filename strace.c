@@ -25,49 +25,12 @@
 // Global state - not the nicest, but this is a tiny application
 int log_fd;
 
-static char buffer[0x20000];
-static size_t buffer_offset;
-
-static bool exchange_buffer_offset(size_t *expected, size_t new) {
-  return __atomic_compare_exchange_n(&buffer_offset, expected, new, false,
-                                     __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
-}
-
-#define DUMP_TRESHOLD (sizeof(buffer) - 0x1000)
-
-static void memcpy(char *dst, const char *start, ssize_t len) {
-  while (len--)
-    *dst++ = *start++;
-}
-
 static void append_buffer(const char *data, ssize_t len) {
-  static long writers;
-  size_t offset = buffer_offset;
-
-  while (true) {
-    while (offset >= DUMP_TRESHOLD) {
-      syscall_no_intercept(SYS_sched_yield);
-      offset = buffer_offset;
-    }
-
-    __atomic_fetch_add(&writers, 1, __ATOMIC_SEQ_CST);
-
-    if (exchange_buffer_offset(&offset, offset + len)) {
-      memcpy(buffer + offset, data, len);
-      break;
-    }
-
-    __atomic_fetch_sub(&writers, 1, __ATOMIC_SEQ_CST);
-  }
-
-  if (offset + len > DUMP_TRESHOLD) {
-    while (__atomic_load_n(&writers, __ATOMIC_SEQ_CST) != 0)
-      syscall_no_intercept(SYS_sched_yield);
-
-    syscall_no_intercept(SYS_write, log_fd, buffer, buffer_offset);
-    __atomic_store_n(&buffer_offset, 0, __ATOMIC_SEQ_CST);
-  }
+  // These should be buffered by the OS anyway and the previous implementation
+  // was broken.
+  syscall_no_intercept(SYS_write, log_fd, data, len);
 }
+
 static char *print_cstr(char *dst, const char *str) {
   while (*str != '\0')
     *dst++ = *str++;
@@ -409,86 +372,85 @@ static char *pre_decode_args(char *dst, long sc, const long args[]) {
     break;
 
 #ifdef __x86_64__
-      case SYS_access:
-        dst = print_cstr_escaped(dst, (char *)args[0], 0);
-        dst = print_cstr(dst, ", ");
-        dst = print_hex(dst, args[1]);
-        break;
+  case SYS_access:
+    dst = print_cstr_escaped(dst, (char *)args[0], 0);
+    dst = print_cstr(dst, ", ");
+    dst = print_hex(dst, args[1]);
+    break;
 #endif // __x86_64__
 
-      case SYS_mmap:
-        for (int argno = 0; argno < sysent[sc].nargs; ++argno) {
-          if (!argno) {
-            dst = print_hex(dst, args[argno]);
-          } else {
-            dst = print_cstr(dst, ", ");
-            if (argno == 2)
-              dst = print_prot(dst, args[2]);
-            else if (argno == 3)
-              dst = print_mmap_flags(dst, args[3]);
-            else if (argno == 4)
-              dst = print_fd(dst, args[4]);
-            else
-              dst = print_hex(dst, args[argno]);
-          }
-        }
-        break;
+  case SYS_mmap:
+    for (int argno = 0; argno < sysent[sc].nargs; ++argno) {
+      if (!argno) {
+        dst = print_hex(dst, args[argno]);
+      } else {
+        dst = print_cstr(dst, ", ");
+        if (argno == 2)
+          dst = print_prot(dst, args[2]);
+        else if (argno == 3)
+          dst = print_mmap_flags(dst, args[3]);
+        else if (argno == 4)
+          dst = print_fd(dst, args[4]);
+        else
+          dst = print_hex(dst, args[argno]);
+      }
+    }
+    break;
 
 #ifdef __x86_64__
-      case SYS_open:
-        dst = print_cstr_escaped(dst, (char *)args[0], 0);
-        dst = print_cstr(dst, ", ");
-        creates = false;
-        dst = print_open_flags(dst, args[1], &creates);
-        if (creates)
-          dst = print_octal(dst, args[2]);
-        break;
+  case SYS_open:
+    dst = print_cstr_escaped(dst, (char *)args[0], 0);
+    dst = print_cstr(dst, ", ");
+    creates = false;
+    dst = print_open_flags(dst, args[1], &creates);
+    if (creates)
+      dst = print_octal(dst, args[2]);
+    break;
 #endif // __x86_64__
 
-      case SYS_openat:
-        dst = print_cstr_escaped(dst, (char *)args[1], 0);
+  case SYS_openat:
+    dst = print_cstr_escaped(dst, (char *)args[1], 0);
+    dst = print_cstr(dst, ", ");
+    creates = false;
+    dst = print_open_flags(dst, args[2], &creates);
+    if (creates)
+      dst = print_octal(dst, args[3]);
+    break;
+
+  case SYS_write:
+    for (int argno = 0; argno < sysent[sc].nargs; ++argno) {
+      if (!argno) {
+        dst = print_fd(dst, args[argno]);
+      } else {
         dst = print_cstr(dst, ", ");
-        creates = false;
-        dst = print_open_flags(dst, args[2], &creates);
-        if (creates)
-          dst = print_octal(dst, args[3]);
-        break;
-
-      case SYS_write:
-        for (int argno = 0; argno < sysent[sc].nargs; ++argno) {
-          if (!argno) {
-            dst = print_fd(dst, args[argno]);
-          } else {
-            dst = print_cstr(dst, ", ");
-            if (argno == 1)
-              dst =
-                  print_cstr_escaped(dst, (char *)args[argno], args[argno + 1]);
-            else
-              dst = print_hex(dst, args[argno]);
-          }
-        }
-        break;
-
-      case SYS_read:
-        dst = print_fd(dst, args[0]);
-        break;
-
-      default:
-        for (int argno = 0; argno < sysent[sc].nargs; ++argno) {
-          if (!argno) {
-            dst = print_hex(dst, args[argno]);
-          } else {
-            dst = print_cstr(dst, ", ");
-            dst = print_hex(dst, args[argno]);
-          }
-        }
-        break;
+        if (argno == 1)
+          dst = print_cstr_escaped(dst, (char *)args[argno], args[argno + 1]);
+        else
+          dst = print_hex(dst, args[argno]);
       }
-      return dst;
+    }
+    break;
+
+  case SYS_read:
+    dst = print_fd(dst, args[0]);
+    break;
+
+  default:
+    for (int argno = 0; argno < sysent[sc].nargs; ++argno) {
+      if (!argno) {
+        dst = print_hex(dst, args[argno]);
+      } else {
+        dst = print_cstr(dst, ", ");
+        dst = print_hex(dst, args[argno]);
+      }
+    }
+    break;
+  }
+  return dst;
 }
 
 static char *post_decode_args(char *dst, long sc, const long args[], long rtn) {
-  (void)rtn;  // unused
+  (void)rtn; // unused
   switch (sc) {
   case SYS_read:
     for (int argno = 1; argno < sysent[sc].nargs; ++argno) {
@@ -522,8 +484,6 @@ int handle_syscall_hook(long sc_no, long arg1, long arg2, long arg3, long arg4,
     dst = print_cstr(dst, ") = ?\n");
     append_buffer(local_buffer, dst - local_buffer);
 
-    if (buffer_offset > 0)
-      syscall_no_intercept(SYS_write, log_fd, buffer, buffer_offset);
     if (outfd_close)
       (void)syscall_no_intercept(SYS_close, log_fd);
 
@@ -542,12 +502,12 @@ int handle_syscall_hook(long sc_no, long arg1, long arg2, long arg3, long arg4,
 
     dst = post_decode_args(dst, sc_no, local_args, *result);
 
-      dst = print_cstr(dst, ") = ");
-      dst = print_signed_dec(dst, *result);
+    dst = print_cstr(dst, ") = ");
+    dst = print_signed_dec(dst, *result);
     if (*result < 0)
       dst = print_cstr(dst, "(error)");
     *dst++ = '\n';
-      append_buffer(local_buffer, dst - local_buffer);
+    append_buffer(local_buffer, dst - local_buffer);
   }
   return 0;
 }
