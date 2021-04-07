@@ -81,6 +81,12 @@ static char *print_hex_impl(char *dst, unsigned long n) {
   *dst++ = '0';
   *dst++ = 'X';
 
+  // Handle 0 specialy because __builtin_clzl(0) is undefined.
+  if (n == 0) {
+    *dst++ = '0';
+    return dst;
+  }
+
   static const char num_xdigits[] = {
       16, 16, 16, 16, 15, 15, 15, 15, 14, 14, 14, 14, 13, 13, 13, 13, 12,
       12, 12, 12, 11, 11, 11, 11, 10, 10, 10, 10, 9,  9,  9,  9,  8,  8,
@@ -107,6 +113,12 @@ static char *print_hex(char *dst, long n) {
 
 static char *print_octal_impl(char *dst, long n) {
   *dst++ = '0';
+
+  // Handle 0 specialy because __builtin_clzl(0) is undefined.
+  if (n == 0) {
+    *dst++ = '0';
+    return dst;
+  }
 
   static const char num_odigits[] = {
       22, 21, 21, 21, 20, 20, 20, 19, 19, 19, 18, 18, 18, 17, 17, 17, 16,
